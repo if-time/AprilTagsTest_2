@@ -3,14 +3,22 @@ package com.example.apriltagstest_2;
 import android.content.Context;
 import android.graphics.SurfaceTexture;
 import android.hardware.Camera;
+import android.opengl.GLES11Ext;
+import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
 import android.util.Log;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+
+import javax.microedition.khronos.egl.EGLConfig;
+import javax.microedition.khronos.opengles.GL10;
 
 public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallback {
 
@@ -24,8 +32,18 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
     private              Renderer                     mRenderer;
     private              ArrayList<ApriltagDetection> mDetections;
 
+    static float[] COLOR_RED = new float[] {1.0f, 0.0f, 0.0f, 1.0f};
+    static float[] COLOR_GREEN = new float[] {0.0f, 1.0f, 0.0f, 1.0f};
+    static float[] COLOR_BLUE = new float[] {0.0f, 0.0f, 1.0f, 1.0f};
+
     public AprilTagView(Context context) {
         super(context);
+
+        // Use OpenGL 2.0
+        setEGLContextClientVersion(2);
+        mRenderer = new AprilTagView.Renderer();
+        setRenderer(mRenderer);
+        setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
     }
 
     public void setCamera(Camera camera)
@@ -92,8 +110,448 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
         camera.setParameters(parameters);
     }
 
-    @Override
-    public void onPreviewFrame(byte[] data, Camera camera) {
+    /**
+     * OpenGL rendering was heavily based on example code from Grafika, especially:
+     * https://github.com/google/grafika/blob/master/src/com/android/grafika/gles/Texture2dProgram.java
+     * https://github.com/google/grafika/blob/master/src/com/android/grafika/gles/Drawable2d.java
+     */
+    class Renderer implements GLSurfaceView.Renderer {
+        // Projection * View * Model matrix
+        float[] M = new float[16];
+        float[] V = new float[16];
+        float[] P = new float[16];
+        float[] PVM = new float[16];
 
+        YUVTextureProgram tp;
+        LinesProgram lp;
+
+        public Renderer() {
+            Matrix.setIdentityM(M, 0);
+        }
+
+        public void onSurfaceCreated(GL10 gl, EGLConfig config) {
+            //Log.i(TAG, "surface created");
+            tp = new YUVTextureProgram();
+            lp = new LinesProgram();
+
+            // Set the background frame color
+            GLES20.glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
+        }
+
+        public void onSurfaceChanged(GL10 gl, int width, int height) {
+            if (mCamera == null)
+                return;
+
+            Log.i(TAG, "surface changed: " + width + "x" + height);
+
+            GLES20.glViewport(0, 0, width, height);
+            Matrix.setIdentityM(V, 0);
+            Matrix.translateM(V, 0, width/2.0f, height/2.0f, 0);
+            Matrix.orthoM(P, 0, 0, width, 0, height, -1, 1);
+
+            // Update surface dimensions and scale preview to fit the surface
+            // Scaling is done to maintain aspect ratio but maximally fill the surface
+            // Note: Camera preview size and surface size have width/height swapped
+            int preview_width = mPreviewSize.height;
+            int preview_height = mPreviewSize.width;
+
+            float width_ratio = width / (float) (preview_width);
+            float height_ratio = height / (float) (preview_height);
+            float scale_ratio = Math.max(width_ratio, height_ratio);
+            int draw_width = (int) (mPreviewSize.width * scale_ratio);
+            int draw_height = (int) (mPreviewSize.height * scale_ratio);
+
+            Matrix.setIdentityM(mRenderer.M, 0);
+            Matrix.scaleM(mRenderer.M, 0, draw_height, draw_width, 1.0f);
+        }
+
+        public void onDrawFrame(GL10 gl) {
+            //Log.i(TAG, "draw frame");
+
+            // Redraw background color
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+
+            if (mDetections != null) {
+                // Set MVP matrix
+                Matrix.multiplyMM(PVM, 0, V, 0, M, 0);
+                Matrix.multiplyMM(PVM, 0, P, 0, PVM, 0);
+
+                tp.draw(PVM, mYuvBuffer, mPreviewSize.width, mPreviewSize.height);
+
+                float[] points = new float[8];
+                for (ApriltagDetection det : mDetections) {
+                    for (int i = 0; i < 4; i += 1) {
+                        double x = 0.5 - (det.p[2*i + 1] / mPreviewSize.height);
+                        double y = 0.5 - (det.p[2*i + 0] / mPreviewSize.width);
+                        points[2*i + 0] = (float)x;
+                        points[2*i + 1] = (float)y;
+                    }
+
+                    // Determine corner points
+                    float[] point_0 = Arrays.copyOfRange(points, 0, 2);
+                    float[] point_1 = Arrays.copyOfRange(points, 2, 4);
+                    float[] point_2 = Arrays.copyOfRange(points, 4, 6);
+                    float[] point_3 = Arrays.copyOfRange(points, 6, 8);
+
+                    // Determine bounding boxes
+                    float[] line_x = new float[]{point_0[0], point_0[1], point_1[0], point_1[1]};
+                    float[] line_y = new float[]{point_0[0], point_0[1], point_3[0], point_3[1]};
+                    float[] line_border = new float[]{point_1[0], point_1[1], point_2[0], point_2[1],
+                            point_2[0], point_2[1], point_3[0], point_3[1]};
+
+                    // Draw lines
+                    lp.draw(PVM, line_x, 2, COLOR_GREEN, GLES20.GL_LINES);
+                    lp.draw(PVM, line_y, 2, COLOR_RED, GLES20.GL_LINES);
+                    lp.draw(PVM, line_border, 4, COLOR_BLUE, GLES20.GL_LINES);
+                    if (!isPrint) {
+                        Log.i(TAG, "line_x: "+line_x[0]+", "+line_x[1]+", "+line_x[2]+", "+line_x[3]);
+                        Log.i(TAG, "line_y: "+line_y[0]+", "+line_y[1]+", "+line_y[2]+", "+line_y[3]);
+                        Log.i(TAG, "line_border: "+line_border[0]+", "+line_border[1]+", "+line_border[2]+", "
+                                +line_border[3]+", "+line_border[4]+", "+line_border[5]+", "+line_border[6]+", "
+                                +line_border[7]);
+                        isPrint = true;
+                    }
+                }
+
+                mDetections = null;
+            }
+
+            // Release the callback buffer
+            if (mCamera != null)
+                mCamera.addCallbackBuffer(mYuvBuffer.array());
+        }
     }
-}
+
+    @Override
+    public void onPreviewFrame(byte[] bytes, Camera camera) {
+        // Check if mCamera has been released in another thread
+        if (this.mCamera == null)
+            return;
+
+        // Spin up another thread so we don't block the UI thread
+        ProcessingThread thread = new ProcessingThread();
+        thread.bytes = bytes;
+        thread.width = mPreviewSize.width;
+        thread.height = mPreviewSize.height;
+        thread.parent = this;
+        thread.run();
+    }
+
+    static class ProcessingThread extends Thread {
+        byte[] bytes;
+        int width;
+        int height;
+        AprilTagView parent;
+
+        public void run() {
+            parent.mDetections = ApriltagNative.apriltag_detect_yuv(bytes, width, height);
+            //            Log.i("parent.mDetections", "run: " + parent.mDetections);
+
+            for (ApriltagDetection det : parent.mDetections) {
+                for (int i = 0; i < 4; i += 1) {
+                    double x = 0.5 - (det.p[2*i + 1]);
+                    double y = 0.5 - (det.p[2*i + 0]);
+                    Log.i("parent.mDetections", "run: x :" + x + " y : " + y);
+                }}
+            parent.requestRender();
+        }
+    }
+
+    /**
+     * 利用OpenGLES做Camera预览
+     */
+    static class YUVTextureProgram {
+        private static final String vertexShaderCode =
+                "uniform mat4 uMVPMatrix;\n" +
+                        "attribute vec4 aPosition;\n" +
+                        "attribute vec2 aTextureCoord;\n" +
+                        "varying vec2 vTextureCoord;\n" +
+                        "void main() {\n" +
+                        "    gl_Position = uMVPMatrix * aPosition;\n" +
+                        "    vTextureCoord = aTextureCoord;\n" +
+                        "}\n";
+
+        private static final String fragmentShaderCode =
+                "precision mediump float;\n" +
+                        "varying vec2 vTextureCoord;\n" +
+                        "uniform sampler2D yTexture;\n" +
+                        "uniform sampler2D uvTexture;\n" +
+                        "void main() {\n" +
+                        "    float y, u, v, r, g, b;\n" +
+                        "    vec2 uv = texture2D(uvTexture, vTextureCoord).ar;\n" +
+                        "    y = texture2D(yTexture, vTextureCoord).r;\n" +
+                        "    u = uv.x - 0.5;\n" +
+                        "    v = uv.y - 0.5;\n" +
+                        "    r = y + 1.370705*v;\n" +
+                        "    g = y - 0.698001*v - 0.337633*u;\n" +
+                        "    b = y + 1.732446*u;\n" +
+                        "    gl_FragColor = vec4(r, g, b, 1.0);\n" +
+                        "}\n";
+
+        private static final float       rectCoords[]     = {
+                -0.5f, -0.5f,   // 0 bottom left
+                0.5f, -0.5f,   // 1 bottom right
+                -0.5f,  0.5f,   // 2 top left
+                0.5f,  0.5f,   // 3 top right
+        };
+        private static final float       rectTexCoords[]  = {
+                1.0f, 1.0f,     // 0 bottom left
+                1.0f, 0.0f,     // 1 bottom right
+                0.0f, 1.0f,     // 2 top left
+                0.0f, 0.0f,     // 3 top right
+        };
+        private static final FloatBuffer rectCoordsBuf    =
+                createFloatBuffer(rectCoords);
+        private static final FloatBuffer rectCoordsTexBuf =
+                createFloatBuffer(rectTexCoords);
+
+        int programId;
+        int yTextureId;
+        int uvTextureId;
+
+        int aPositionLoc;
+        int aTextureCoordLoc;
+        int uMVPMatrixLoc;
+        int yTextureLoc;
+        int uvTextureLoc;
+
+        static FloatBuffer createFloatBuffer(float[] coords) {
+            // Allocate a direct ByteBuffer, using 4 bytes per float, and copy coords into it.
+            ByteBuffer bb = ByteBuffer.allocateDirect(coords.length * 4);
+            bb.order(ByteOrder.nativeOrder());
+            FloatBuffer fb = bb.asFloatBuffer();
+            fb.put(coords);
+            fb.position(0);
+            return fb;
+        }
+
+        public YUVTextureProgram() {
+            // Compile the shader code into a GL program
+            int vid = loadShader(GLES20.GL_VERTEX_SHADER, vertexShaderCode);
+            int fid = loadShader(GLES20.GL_FRAGMENT_SHADER, fragmentShaderCode);
+            programId = GLES20.glCreateProgram();
+            checkGlError("glCreateProgram");
+            GLES20.glAttachShader(programId, vid);
+            checkGlError("glAttachShader");
+            GLES20.glAttachShader(programId, fid);
+            checkGlError("glAttachShader");
+            GLES20.glLinkProgram(programId);
+            int[] linkStatus = new int[1];
+            GLES20.glGetProgramiv(programId, GLES20.GL_LINK_STATUS, linkStatus, 0);
+            if (linkStatus[0] != GLES20.GL_TRUE) {
+                Log.e(TAG, "Could not link program: ");
+                Log.e(TAG, GLES20.glGetProgramInfoLog(programId));
+                GLES20.glDeleteProgram(programId);
+            }
+
+            // Create textures
+            // 相机预览使用EXTERNAL_OES纹理
+            int[] tid = new int[2];
+            GLES20.glGenTextures(2, tid, 0);
+            checkGlError("glGenTextures");
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tid[0]);
+            checkGlError("glBindTexture");
+
+            GLES20.glTexParameterf(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER,
+                    GLES20.GL_NEAREST);
+            GLES20.glTexParameterf(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER,
+                    GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S,
+                    GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T,
+                    GLES20.GL_CLAMP_TO_EDGE);
+            yTextureId = tid[0];
+
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+            // 绑定到扩展纹理
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tid[1]);
+            checkGlError("glBindTexture");
+
+            GLES20.glTexParameterf(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER,
+                    GLES20.GL_NEAREST);
+            GLES20.glTexParameterf(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER,
+                    GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S,
+                    GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T,
+                    GLES20.GL_CLAMP_TO_EDGE);
+            uvTextureId = tid[1];
+
+            // Get handles to attributes and uniforms
+            aPositionLoc = GLES20.glGetAttribLocation(programId, "aPosition");
+            checkGlError("get aPosition");
+            aTextureCoordLoc = GLES20.glGetAttribLocation(programId, "aTextureCoord");
+            checkGlError("get aTextureCoord");
+            uMVPMatrixLoc = GLES20.glGetUniformLocation(programId, "uMVPMatrix");
+            checkGlError("get uMVPMatrix");
+            yTextureLoc = GLES20.glGetUniformLocation(programId, "yTexture");
+            checkGlError("get yTexture");
+            uvTextureLoc = GLES20.glGetUniformLocation(programId, "uvTexture");
+            checkGlError("get uvTexture");
+        }
+
+        public void draw(float[] PVM, ByteBuffer yuvBuffer, int width, int height) {
+
+            GLES20.glUseProgram(programId);
+            checkGlError("glUseProgram");
+
+            GLES20.glUniformMatrix4fv(uMVPMatrixLoc, 1, false, PVM, 0);
+            checkGlError("glUniformMatrix4fv");
+
+            // Y texture
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            checkGlError("glActiveTexture");
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, yTextureId);
+            checkGlError("glBindTexture");
+            yuvBuffer.position(0);
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE, width,
+                    height, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, yuvBuffer);
+            checkGlError("glTexImage2D");
+            GLES20.glUniform1i(yTextureLoc, 0);
+
+            // UV texture
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+            checkGlError("glActiveTexture");
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, uvTextureId);
+            checkGlError("glBindTexture");
+            yuvBuffer.position(width*height);
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE_ALPHA, width/2,
+                    height/2, 0, GLES20.GL_LUMINANCE_ALPHA, GLES20.GL_UNSIGNED_BYTE, yuvBuffer);
+            checkGlError("glTexImage2D");
+            GLES20.glUniform1i(uvTextureLoc, 1);
+
+            GLES20.glEnableVertexAttribArray(aPositionLoc);
+            GLES20.glVertexAttribPointer(aPositionLoc, 2,
+                    GLES20.GL_FLOAT, false, 8, rectCoordsBuf);
+
+            GLES20.glEnableVertexAttribArray(aTextureCoordLoc);
+            GLES20.glVertexAttribPointer(aTextureCoordLoc, 2,
+                    GLES20.GL_FLOAT, false, 8, rectCoordsTexBuf);
+
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+
+            GLES20.glDisableVertexAttribArray(aPositionLoc);
+            GLES20.glDisableVertexAttribArray(aTextureCoordLoc);
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0);
+            GLES20.glUseProgram(0);
+        }
+    }
+
+    /**
+     * 画框
+     */
+    static class LinesProgram {
+        private static final String vertexShaderCode =
+                "uniform mat4 uMVPMatrix;\n" +
+                        "attribute vec4 aPosition;\n" +
+                        "void main() {\n" +
+                        "    gl_Position = uMVPMatrix * aPosition;\n" +
+                        "}\n";
+
+        private static final String fragmentShaderCode =
+                "precision mediump float;\n" +
+                        "uniform vec4 uColor;\n" +
+                        "void main() {\n" +
+                        "    gl_FragColor = uColor;\n" +
+                        "}\n";
+
+        private FloatBuffer buffer;
+
+        int programId;
+
+        int aPositionLoc;
+        int uMVPMatrixLoc;
+        int uColorLoc;
+
+        public LinesProgram() {
+            // Compile the shader code into a GL program
+            int vid = loadShader(GLES20.GL_VERTEX_SHADER, vertexShaderCode);
+            int fid = loadShader(GLES20.GL_FRAGMENT_SHADER, fragmentShaderCode);
+            programId = GLES20.glCreateProgram();
+            checkGlError("glCreateProgram");
+            GLES20.glAttachShader(programId, vid);
+            checkGlError("glAttachShader");
+            GLES20.glAttachShader(programId, fid);
+            checkGlError("glAttachShader");
+            GLES20.glLinkProgram(programId);
+            int[] linkStatus = new int[1];
+            GLES20.glGetProgramiv(programId, GLES20.GL_LINK_STATUS, linkStatus, 0);
+            if (linkStatus[0] != GLES20.GL_TRUE) {
+                Log.e(TAG, "Could not link program: ");
+                Log.e(TAG, GLES20.glGetProgramInfoLog(programId));
+                GLES20.glDeleteProgram(programId);
+            }
+
+            // Get handles to attributes and uniforms
+            aPositionLoc = GLES20.glGetAttribLocation(programId, "aPosition");
+            checkGlError("get aPosition");
+            uMVPMatrixLoc = GLES20.glGetUniformLocation(programId, "uMVPMatrix");
+            checkGlError("get uMVPMatrix");
+            uColorLoc = GLES20.glGetUniformLocation(programId, "uColor");
+            checkGlError("get uColor");
+        }
+
+        // points = [x0 y0 x1 y1 ...]
+        // npoints = number of xy pairs in points (e.g. points is expected to have
+        //           a length of at least 2*npoints)
+        public void draw(float[] PVM, float[] points, int npoints, float[] rgba, int type) {
+            // Reuse points buffer if possible
+            if (buffer == null || 2*npoints > buffer.capacity()) {
+                int nbytes = 4 * 2*npoints;
+                ByteBuffer bb = ByteBuffer.allocateDirect(nbytes);
+                bb.order(ByteOrder.nativeOrder());
+                buffer = bb.asFloatBuffer();
+            }
+            buffer.position(0);
+            buffer.put(points, 0, 2*npoints);
+            buffer.position(0);
+
+            // 使用shader程序
+            GLES20.glUseProgram(programId);
+            checkGlError("glUseProgram");
+
+            // 将最终变换矩阵传入shader程序
+            GLES20.glUniformMatrix4fv(uMVPMatrixLoc, 1, false, PVM, 0);
+            checkGlError("glUniformMatrix4fv");
+
+            GLES20.glUniform4fv(uColorLoc, 1, rgba, 0);
+            checkGlError("glUniform4fv");
+
+            // Render frame
+            GLES20.glEnableVertexAttribArray(aPositionLoc);// 允许使用顶点坐标数组
+            GLES20.glVertexAttribPointer(aPositionLoc, 2,
+                    GLES20.GL_FLOAT, false, 8, buffer);// 顶点数据传递到顶点着色器
+
+            GLES20.glLineWidth(4.0f);
+            GLES20.glDrawArrays(type, 0, npoints);// 图形绘制
+
+            GLES20.glDisableVertexAttribArray(aPositionLoc);
+            GLES20.glUseProgram(0);
+        }
+    }
+
+
+    static int loadShader(int type, String shaderCode){
+        // create a vertex shader type (GLES20.GL_VERTEX_SHADER)
+        // or a fragment shader type (GLES20.GL_FRAGMENT_SHADER)
+        int shader = GLES20.glCreateShader(type);
+        checkGlError("glCreateShader");
+
+        // add the source code to the shader and compile it
+        GLES20.glShaderSource(shader, shaderCode);
+        checkGlError("glShaderSource");
+        GLES20.glCompileShader(shader);
+        checkGlError("glCompileShader");
+
+        return shader;
+    }
+
+    static void checkGlError(String op) {
+        int error = GLES20.glGetError();
+        if (error != GLES20.GL_NO_ERROR) {
+            String msg = op + ": glError 0x" + Integer.toHexString(error);
+            Log.e(TAG, msg);
+            throw new RuntimeException(msg);
+        }
+    }}
