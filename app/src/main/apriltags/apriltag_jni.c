@@ -43,7 +43,7 @@ JNIEXPORT void JNICALL Java_com_example_apriltagstest_12_ApriltagNative_native_1
     }
 
     // Get ApriltagDetection methods
-    jclass ad_cls = (*env)->FindClass(env, "edu/umich/eecs/april/apriltag/ApriltagDetection");
+    jclass ad_cls = (*env)->FindClass(env, "com/example/apriltagstest_2/ApriltagDetection");
     if (!ad_cls) {
         __android_log_write(ANDROID_LOG_ERROR, "apriltag_jni",
                             "couldn't find ApriltagDetection class");
