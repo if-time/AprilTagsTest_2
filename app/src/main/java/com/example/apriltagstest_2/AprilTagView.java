@@ -30,11 +30,12 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
     private              ByteBuffer                   mYuvBuffer;
     private              SurfaceTexture               mSurfaceTexture = new SurfaceTexture(0);
     private              Renderer                     mRenderer;
-    private              ArrayList<ApriltagDetection> mDetections;
+//    private              ArrayList<ApriltagDetection> mDetections;
+    private ArrayList<ApriltagPose> mPoses;
 
-    static float[] COLOR_RED = new float[] {1.0f, 0.0f, 0.0f, 1.0f};
-    static float[] COLOR_GREEN = new float[] {0.0f, 1.0f, 0.0f, 1.0f};
-    static float[] COLOR_BLUE = new float[] {0.0f, 0.0f, 1.0f, 1.0f};
+    static float[] COLOR_RED   = new float[]{1.0f, 0.0f, 0.0f, 1.0f};
+    static float[] COLOR_GREEN = new float[]{0.0f, 1.0f, 0.0f, 1.0f};
+    static float[] COLOR_BLUE  = new float[]{0.0f, 0.0f, 1.0f, 1.0f};
 
     public AprilTagView(Context context) {
         super(context);
@@ -46,8 +47,7 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
         setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
     }
 
-    public void setCamera(Camera camera)
-    {
+    public void setCamera(Camera camera) {
         if (camera == mCamera)
             return;
         // Stop the previous camera preview
@@ -55,7 +55,8 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
             try {
                 mCamera.stopPreview();
                 //Log.i(TAG, "Camera stop");
-            } catch (Exception e) { }
+            } catch (Exception e) {
+            }
         }
 
         // Start the new mCamera preview
@@ -91,14 +92,13 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
         mCamera = camera;
     }
 
-    private void setHighestCameraPreviewResolution(Camera camera)
-    {
+    private void setHighestCameraPreviewResolution(Camera camera) {
         Camera.Parameters parameters = camera.getParameters();
         List<Camera.Size> sizeList = camera.getParameters().getSupportedPreviewSizes();
 
         Camera.Size bestSize = sizeList.get(0);
-        for (int i = 1; i < sizeList.size(); i++){
-            if ((sizeList.get(i).width * sizeList.get(i).height) > (bestSize.width * bestSize.height)){
+        for (int i = 1; i < sizeList.size(); i++) {
+            if ((sizeList.get(i).width * sizeList.get(i).height) > (bestSize.width * bestSize.height)) {
                 bestSize = sizeList.get(i);
             }
         }
@@ -117,13 +117,13 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
      */
     class Renderer implements GLSurfaceView.Renderer {
         // Projection * View * Model matrix
-        float[] M = new float[16];
-        float[] V = new float[16];
-        float[] P = new float[16];
+        float[] M   = new float[16];
+        float[] V   = new float[16];
+        float[] P   = new float[16];
         float[] PVM = new float[16];
 
         YUVTextureProgram tp;
-        LinesProgram lp;
+        LinesProgram      lp;
 
         public Renderer() {
             Matrix.setIdentityM(M, 0);
@@ -146,7 +146,7 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
 
             GLES20.glViewport(0, 0, width, height);
             Matrix.setIdentityM(V, 0);
-            Matrix.translateM(V, 0, width/2.0f, height/2.0f, 0);
+            Matrix.translateM(V, 0, width / 2.0f, height / 2.0f, 0);
             Matrix.orthoM(P, 0, 0, width, 0, height, -1, 1);
 
             // Update surface dimensions and scale preview to fit the surface
@@ -171,7 +171,7 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
             // Redraw background color
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
 
-            if (mDetections != null) {
+            if (mPoses != null) {
                 // Set MVP matrix
                 Matrix.multiplyMM(PVM, 0, V, 0, M, 0);
                 Matrix.multiplyMM(PVM, 0, P, 0, PVM, 0);
@@ -179,12 +179,13 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
                 tp.draw(PVM, mYuvBuffer, mPreviewSize.width, mPreviewSize.height);
 
                 float[] points = new float[8];
-                for (ApriltagDetection det : mDetections) {
+                for (ApriltagPose pose : mPoses) {
+                    ApriltagDetection det = pose.apd;
                     for (int i = 0; i < 4; i += 1) {
-                        double x = 0.5 - (det.p[2*i + 1] / mPreviewSize.height);
-                        double y = 0.5 - (det.p[2*i + 0] / mPreviewSize.width);
-                        points[2*i + 0] = (float)x;
-                        points[2*i + 1] = (float)y;
+                        double x = 0.5 - (det.p[2 * i + 1] / mPreviewSize.height);
+                        double y = 0.5 - (det.p[2 * i + 0] / mPreviewSize.width);
+                        points[2 * i + 0] = (float) x;
+                        points[2 * i + 1] = (float) y;
                     }
 
                     // Determine corner points
@@ -204,16 +205,16 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
                     lp.draw(PVM, line_y, 2, COLOR_RED, GLES20.GL_LINES);
                     lp.draw(PVM, line_border, 4, COLOR_BLUE, GLES20.GL_LINES);
                     if (!isPrint) {
-                        Log.i(TAG, "line_x: "+line_x[0]+", "+line_x[1]+", "+line_x[2]+", "+line_x[3]);
-                        Log.i(TAG, "line_y: "+line_y[0]+", "+line_y[1]+", "+line_y[2]+", "+line_y[3]);
-                        Log.i(TAG, "line_border: "+line_border[0]+", "+line_border[1]+", "+line_border[2]+", "
-                                +line_border[3]+", "+line_border[4]+", "+line_border[5]+", "+line_border[6]+", "
-                                +line_border[7]);
+                        Log.i(TAG, "line_x: " + line_x[0] + ", " + line_x[1] + ", " + line_x[2] + ", " + line_x[3]);
+                        Log.i(TAG, "line_y: " + line_y[0] + ", " + line_y[1] + ", " + line_y[2] + ", " + line_y[3]);
+                        Log.i(TAG, "line_border: " + line_border[0] + ", " + line_border[1] + ", " + line_border[2] + ", "
+                                + line_border[3] + ", " + line_border[4] + ", " + line_border[5] + ", " + line_border[6] + ", "
+                                + line_border[7]);
                         isPrint = true;
                     }
                 }
 
-                mDetections = null;
+                mPoses = null;
             }
 
             // Release the callback buffer
@@ -222,6 +223,11 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
         }
     }
 
+    /**
+     * 预览回调，传递yuv视频流数据
+     * @param bytes
+     * @param camera
+     */
     @Override
     public void onPreviewFrame(byte[] bytes, Camera camera) {
         // Check if mCamera has been released in another thread
@@ -238,21 +244,23 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
     }
 
     static class ProcessingThread extends Thread {
-        byte[] bytes;
-        int width;
-        int height;
+        byte[]       bytes;
+        int          width;
+        int          height;
         AprilTagView parent;
 
         public void run() {
-            parent.mDetections = ApriltagNative.apriltag_detect_yuv(bytes, width, height);
-            //            Log.i("parent.mDetections", "run: " + parent.mDetections);
-
-            for (ApriltagDetection det : parent.mDetections) {
-                for (int i = 0; i < 4; i += 1) {
-                    double x = 0.5 - (det.p[2*i + 1]);
-                    double y = 0.5 - (det.p[2*i + 0]);
-                    Log.i("parent.mDetections", "run: x :" + x + " y : " + y);
-                }}
+//            parent.mDetections = ApriltagNative.apriltag_detect_yuv(bytes, width, height);
+//            //            Log.i("parent.mDetections", "run: " + parent.mDetections);
+//
+//            for (ApriltagDetection det : parent.mDetections) {
+//                for (int i = 0; i < 4; i += 1) {
+//                    double x = 0.5 - (det.p[2 * i + 1]);
+//                    double y = 0.5 - (det.p[2 * i + 0]);
+//                    Log.i("parent.mDetections", "run: x :" + x + " y : " + y);
+//                }
+//            }
+            parent.mPoses = ApriltagNative.apriltag_detect_yuv(bytes, width, height);
             parent.requestRender();
         }
     }
@@ -291,8 +299,8 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
         private static final float       rectCoords[]     = {
                 -0.5f, -0.5f,   // 0 bottom left
                 0.5f, -0.5f,   // 1 bottom right
-                -0.5f,  0.5f,   // 2 top left
-                0.5f,  0.5f,   // 3 top right
+                -0.5f, 0.5f,   // 2 top left
+                0.5f, 0.5f,   // 3 top right
         };
         private static final float       rectTexCoords[]  = {
                 1.0f, 1.0f,     // 0 bottom left
@@ -415,9 +423,9 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
             checkGlError("glActiveTexture");
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, uvTextureId);
             checkGlError("glBindTexture");
-            yuvBuffer.position(width*height);
-            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE_ALPHA, width/2,
-                    height/2, 0, GLES20.GL_LUMINANCE_ALPHA, GLES20.GL_UNSIGNED_BYTE, yuvBuffer);
+            yuvBuffer.position(width * height);
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE_ALPHA, width / 2,
+                    height / 2, 0, GLES20.GL_LUMINANCE_ALPHA, GLES20.GL_UNSIGNED_BYTE, yuvBuffer);
             checkGlError("glTexImage2D");
             GLES20.glUniform1i(uvTextureLoc, 1);
 
@@ -497,14 +505,14 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
         //           a length of at least 2*npoints)
         public void draw(float[] PVM, float[] points, int npoints, float[] rgba, int type) {
             // Reuse points buffer if possible
-            if (buffer == null || 2*npoints > buffer.capacity()) {
-                int nbytes = 4 * 2*npoints;
+            if (buffer == null || 2 * npoints > buffer.capacity()) {
+                int nbytes = 4 * 2 * npoints;
                 ByteBuffer bb = ByteBuffer.allocateDirect(nbytes);
                 bb.order(ByteOrder.nativeOrder());
                 buffer = bb.asFloatBuffer();
             }
             buffer.position(0);
-            buffer.put(points, 0, 2*npoints);
+            buffer.put(points, 0, 2 * npoints);
             buffer.position(0);
 
             // 使用shader程序
@@ -532,7 +540,7 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
     }
 
 
-    static int loadShader(int type, String shaderCode){
+    static int loadShader(int type, String shaderCode) {
         // create a vertex shader type (GLES20.GL_VERTEX_SHADER)
         // or a fragment shader type (GLES20.GL_FRAGMENT_SHADER)
         int shader = GLES20.glCreateShader(type);
@@ -554,4 +562,5 @@ public class AprilTagView extends GLSurfaceView implements Camera.PreviewCallbac
             Log.e(TAG, msg);
             throw new RuntimeException(msg);
         }
-    }}
+    }
+}

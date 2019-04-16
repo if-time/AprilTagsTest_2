@@ -104,7 +104,14 @@ public class MainActivity extends AppCompatActivity {
         boolean useRear = (sharedPreferences.getString("device_settings_camera_facing", "1").equals("1")) ? true : false;
         Log.i(TAG, String.format("decimation: %f | sigma: %f | nthreads: %d | tagFamily: %s | useRear: %b",
                 decimation, sigma, nthreads, tagFamily, useRear));
-        ApriltagNative.apriltag_init(tagFamily, 2, decimation, sigma, nthreads);
+        double tagsize = 0.02;
+        double fx = 611.963;
+        double fy = 611.963;
+        double cx = 309.007;
+        double cy = 242.101;
+        int rec_id = 0;
+        ApriltagNative.apriltag_init(tagFamily, 2, decimation, sigma, nthreads, tagsize,
+                fx, fy, cx, cy, rec_id);
 
         // Find the camera index of front or rear camera
         int camidx = 0;
